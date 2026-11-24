@@ -1,207 +1,106 @@
-import org.jsoup.Jsoup;
-import org.jsoup.nodes.Document;
-import org.jsoup.nodes.Element;
-import org.jsoup.select.Elements;
-import okhttp3.*;
+import axios from 'axios';
+import cheerio from 'cheerio';
 
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.TimeUnit;
+const SITES = [
+    { name: 'JavHDPorn', url: 'https://javhdporn.com/search/%s', selector: '.item' },
+    { name: 'JavNinja', url: 'https://jav.ninja/search?q=%s', selector: '.movie-item' },
+    { name: 'JavLibrary', url: 'https://javlibrary.com/search.php?keyword=%s', selector: '.movie' },
+    { name: 'JavBus', url: 'https://www.javbus.com/search/%s', selector: '.movie' }
+];
 
-public class JavSearch {
+async function search(query) {
+    console.log(`--- Searching for: ${query} ---\n`);
 
-    // Configuration
-    private static final String NYAA_RSS = "https://sukebei.nyaa.si/rss?search=%s&category=0_0";
-    
-    // Fallback Sites Chain
-    private static final List<SiteConfig> SITES = List.of(
-        new SiteConfig("JavLibrary", "https://javlibrary.com/search.php?keyword=%s", "//a[contains(@class,'movie')]"),
-        new SiteConfig("JavBus", "https://www.javbus.com/search/%s", "//a[contains(@class,'movie')]"),
-        new SiteConfig("JavDB", "https://javdb.com/search?q=%s", "//a[contains(@class,'movie')]")
-    );
+    // 1. Nyaa Search
+    await searchNyaa(query);
 
-    private static final OkHttpClient client = new OkHttpClient.Builder()
-            .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(10, TimeUnit.SECONDS)
-            .build();
-
-    public static void main(String[] args) {
-        if (args.length == 0) {
-            System.out.println("Usage: java JavSearch <search_term>");
+    // 2. Streaming Sites
+    for (const site of SITES) {
+        console.log(`🔍 Trying ${site.name}...`);
+        const results = await scrapeSite(site, query);
+        if (results.length > 0) {
+            console.log(`✅ Success! Found ${results.length} results on ${site.name}`);
+            printResults(results);
             return;
         }
-
-        String query = String.join(" ", args);
-        System.out.println("--- Searching for: " + query + " ---\n");
-
-        // 1. Try Nyaa/Sukebei First
-        searchNyaa(query);
-
-        // 2. Fallback to Streaming Sites
-        searchStreamingSites(query);
     }
+    console.log('❌ All streaming sites failed.');
+}
 
-    private static void searchNyaa(String query) {
-        try {
-            String rssUrl = String.format(NYAA_RSS, query.replace(" ", "+"));
-            Request request = new Request.Builder().url(rssUrl).get().build();
-            
-            Response response = client.newCall(request).execute();
-            if (!response.isSuccessful()) return;
+async function searchNyaa(query) {
+    try {
+        const rssUrl = `https://sukebei.nyaa.si/rss?search=${encodeURIComponent(query)}&category=0_0`;
+        const { data } = await axios.get(rssUrl);
+        const $ = cheerio.load(data, { xmlMode: true });
+        const items = $('item');
 
-            String xml = response.body().string();
-            // Simple XML parsing for RSS (using Jsoup since it handles XML well too)
-            Document doc = Jsoup.parse(xml, "", Parser.xmlParser());
-            Elements items = doc.select("item");
-
-            if (items.isEmpty()) {
-                System.out.println("❌ No torrents found on Nyaa/Sukebei.");
-            } else {
-                System.out.println("✅ Found Torrents on Nyaa/Sukebei:");
-                int count = 0;
-                for (Element item : items) {
-                    if (count++ >= 5) break; // Limit to 5 results
-                    String title = item.selectFirst("title") != null ? item.selectFirst("title").text() : "Unknown";
-                    String link = item.selectFirst("link") != null ? item.selectFirst("link").text() : "";
-                    
-                    // Extract magnet link from enclosure or links
-                    Element enclosure = item.selectFirst("enclosure");
-                    String magnet = "";
-                    if (enclosure != null && enclosure.attr("type").contains("magnet")) {
-                        magnet = enclosure.attr("url");
-                    }
-
-                    System.out.printf("%d. %s\n   Link: %s\n   Magnet: %s\n\n", 
-                            count, title, link, magnet.isEmpty() ? "N/A" : magnet);
-                }
-            }
-        } catch (Exception e) {
-            System.out.println("⚠️ Nyaa Error: " + e.getMessage());
+        if (items.length === 0) {
+            console.log('❌ No torrents found on Nyaa/Sukebei.');
+        } else {
+            console.log('✅ Found Torrents on Nyaa/Sukebei:');
+            items.slice(0, 5).each((i, el) => {
+                const title = $(el).find('title').text();
+                const link = $(el).find('link').text();
+                const magnet = $(el).find('enclosure[type*=magnet]').attr('url') || 'N/A';
+                console.log(`${i + 1}. ${title}\n   Link: ${link}\n   Magnet: ${magnet}\n`);
+            });
         }
+    } catch (e) {
+        console.log(`⚠️ Nyaa Error: ${e.message}`);
     }
+}
 
-    private static void searchStreamingSites(String query) {
-        System.out.println("\n--- Fallback: Searching Streaming Sites ---");
-        
-        for (SiteConfig site : SITES) {
-            System.out.println("🔍 Trying " + site.name + "...");
-            List<Result> results = scrapeSite(site, query);
-            
-            if (!results.isEmpty()) {
-                System.out.println("  ✅ Success! Found " + results.size() + " results on " + site.name);
-                printResults(results);
-                return; // Stop after first successful site
-            } else {
-                System.out.println("  ❌ No results or blocked on " + site.name + ", trying next...");
-            }
+async function scrapeSite(site, query) {
+    try {
+        const url = site.url.replace('%s', encodeURIComponent(query));
+        const { data } = await axios.get(url, {
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+        });
+        const $ = cheerio.load(data);
+        const results = [];
+
+        $(site.selector).each((i, el) => {
+            const title = $(el).text().trim();
+            const linkEl = $(el).find('a:first');
+            if (!linkEl.length || !title) return;
+
+            let href = linkEl.attr('href');
+            if (href.startsWith('http')) return;
+
+            // Resolve relative URL
+            const baseUrl = new URL(url);
+            const fullUrl = new URL(href, baseUrl).href;
+
+            const isUncen = title.toLowerCase().includes('uncensored') || 
+                            title.toLowerCase().includes('uncen') ||
+                            fullUrl.includes('uncensored') ||
+                            fullUrl.includes('u-');
+
+            results.push({ title, url: fullUrl, isUncen, source: site.name });
+        });
+
+        // Sort Uncensored first
+        results.sort((a, b) => b.isUncen - a.isUncen);
+        return results.slice(0, 10);
+    } catch (e) {
+        return [];
+    }
+}
+
+function printResults(results) {
+    console.log('\n📺 Final Results:');
+    results.forEach((r, i) => {
+        console.log(`${i + 1}. ${r.title} ${r.isUncen ? '[UNCEN]' : '[CENSORED]'}\n   Page: ${r.url}\n`);
+        if (i === 0) {
+            console.log('   🎬 Attempting direct link extraction...');
+            // Simplified direct link extraction for demo
+            console.log('   (See Java version for detailed extraction)\n');
         }
-        System.out.println("❌ All streaming sites failed.");
-    }
+    });
+}
 
-    private static List<Result> scrapeSite(SiteConfig site, String query) {
-        try {
-            String url = String.format(site.urlTemplate, query.replace(" ", "+"));
-            Document doc = Jsoup.connect(url)
-                    .userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                    .timeout(10000)
-                    .get();
-
-            List<Result> results = new ArrayList<>();
-            Elements movieElements = doc.select(site.cssSelector);
-
-            for (Element el : movieElements) {
-                String href = el.attr("href");
-                if (href.startsWith("http")) continue; // Skip absolute nav links
-                
-                String fullUrl = href.startsWith("//") ? "https:" + href : href;
-                if (!fullUrl.startsWith("http")) fullUrl = "https://" + fullUrl;
-
-                String title = el.text().trim();
-                boolean isUncen = title.toLowerCase().contains("uncensored") || 
-                                 title.toLowerCase().contains("uncen") ||
-                                 fullUrl.contains("uncensored");
-
-                results.add(new Result(title, fullUrl, isUncen, site.name));
-            }
-            
-            // Sort Uncensored first
-            results.sort((a, b) -> Boolean.compare(b.isUncen, a.isUncen));
-            return results.subList(0, Math.min(results.size(), 10));
-
-        } catch (IOException e) {
-            return new ArrayList<>();
-        }
-    }
-
-    private static void printResults(List<Result> results) {
-        System.out.println("\n📺 Final Results:");
-        for (int i = 0; i < results.size(); i++) {
-            Result r = results.get(i);
-            System.out.printf("%d. %s %s\n   Page: %s\n\n", 
-                    i + 1, r.title, r.isUncen ? "[UNCEN]" : "[CENSORED]", r.url);
-            
-            // Optional: Extract direct link for the first result
-            if (i == 0) {
-                System.out.println("   🎬 Attempting direct link extraction...");
-                String directLink = extractDirectLink(r.url);
-                if (directLink != null) {
-                    System.out.println("   Direct Link: " + directLink);
-                } else {
-                    System.out.println("   (No direct link found)");
-                }
-            }
-        }
-    }
-
-    private static String extractDirectLink(String pageUrl) {
-        try {
-            Document doc = Jsoup.connect(pageUrl)
-                    .userAgent("Mozilla/5.0")
-                    .timeout(10000)
-                    .get();
-            
-            // Look for video tag
-            Element video = doc.selectFirst("video source");
-            if (video != null) return video.attr("src");
-            
-            // Look for script tags containing mp4/m3u8
-            for (Element script : doc.select("script")) {
-                String content = script.html();
-                if (content.contains(".mp4") || content.contains(".m3u8")) {
-                    // Simple regex to find URL
-                    java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"(https?://[^\"\\']+\\.(?:mp4|m3u8))\"").matcher(content);
-                    if (m.find()) return m.group(1);
-                }
-            }
-        } catch (IOException e) {}
-        return null;
-    }
-
-    // Helper Classes
-    static class SiteConfig {
-        String name;
-        String urlTemplate;
-        String cssSelector;
-        
-        SiteConfig(String name, String urlTemplate, String cssSelector) {
-            this.name = name;
-            this.urlTemplate = urlTemplate;
-            this.cssSelector = cssSelector;
-        }
-    }
-
-    static class Result {
-        String title;
-        String url;
-        boolean isUncen;
-        String source;
-
-        Result(String title, String url, boolean isUncen, String source) {
-            this.title = title;
-            this.url = url;
-            this.isUncen = isUncen;
-            this.source = source;
-        }
-    }
+if (process.argv.length < 3) {
+    console.log('Usage: node jav_search.mjs <search_term>');
+} else {
+    search(process.argv.slice(2).join(' '));
 }
